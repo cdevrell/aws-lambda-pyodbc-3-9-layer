@@ -1,0 +1,111 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: |
+  Deploys the S3 bucket and Lambda functions required to process BCP files to the staging DWH and replication to CDH.
+
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  LambdaVpcId:
+    Type: String
+    Description: The ID of the VPC in which Lambda will run in order to access EC2 resource(s)
+
+  LambdaSubnetId:
+    Type: String
+    Description: The ID of the subnet in which Lambda will run in order to access EC2 resource(s)
+
+Resources:
+  PythonODBCLambdaLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      ContentUri: pyodbc-3-9.zip
+      CompatibleRuntimes:
+        - "python3.9"
+
+  LambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: test-sql-query
+      Handler: lambda_function.lambda_handler
+      Runtime: python3.9
+      CodeUri: lambda_function/
+      Layers:
+        - !Ref PythonODBCLambdaLayer
+      Timeout: 300
+      MemorySize: 2048
+      Role: !GetAtt LambdaRole.Arn
+      Environment:
+        Variables:
+          SQLCREDSSECRET: !Sub ${AWS::StackName}-SqlCreds
+      VpcConfig:
+        SecurityGroupIds:
+          - !GetAtt LambdaSecurityGroup.GroupId
+        SubnetIds:
+          - !Ref LambdaSubnetId
+  
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Description: "String"
+      Policies:
+        - PolicyName: LambdaFunction
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !GetAtt LambdaLogGroup.Arn
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref SqlCredsSecret
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: !GetAtt SqlCredsSecretKmsKey.Arn
+  
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties: 
+      GroupDescription: "Allow Lambda to access EC2 SQL Server"
+      VpcId: !Ref "LambdaVpcId"
+  
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: "/aws/lambda/test-sql-query"
+      RetentionInDays: 30
+  
+  SqlCredsSecretKmsKey:
+    DeletionPolicy: Retain
+    Type: 'AWS::KMS::Key'
+    Properties:
+      Description: Key for SQL credentials used by Lambda
+      KeyPolicy:
+        Version: 2012-10-17
+        Statement:
+        - Sid: Enable IAM User Permissions
+          Effect: Allow
+          Principal:
+            AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+          Action: kms:*
+          Resource: "*"
+  
+  SqlCredsSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${AWS::StackName}-SqlCreds
+      Description: Creds for SQL Server. Used by Lambda
+      SecretString: '{"server":"update-after-deployment","port":"update-after-deployment","database":"update-after-deployment","user":"update-after-deployment","password":"update-after-deployment"}'
+      KmsKeyId: !Ref SqlCredsSecretKmsKey
